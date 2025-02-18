@@ -1,0 +1,166 @@
+#include <esp_now.h>
+#include <WiFi.h>
+
+// Slave MAC addresses
+uint8_t slave1[] = {0x84, 0xF3, 0xEB, 0xDC, 0xDC, 0x7C};
+uint8_t slave2[] = {0x30, 0x83, 0x98, 0xA2, 0xC1, 0x72};
+uint8_t slave3[] = {0xBC, 0xFF, 0x4D, 0x19, 0x90, 0xD9};
+
+#define BUTTON_PIN 5  
+#define LED_PIN 4     
+
+struct struct_message {
+    char message[32];
+} receivedData, replyData;
+
+bool messageSent = false;
+bool gameActive = false;
+unsigned long gameStartTime = 0;
+const unsigned long gameDuration = 10000; 
+
+int totalPressCount = 0;  // Accumulate total presses from all slaves
+int receivedCounts = 0;   // Track how many slaves have sent their counts
+const int totalSlaves = 3;  // Number of slaves expected to respond
+
+// Store individual counts from each slave
+int pressCounts[3] = {0, 0, 0}; 
+
+// Callback function when ESP32 receives a message
+void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
+    memcpy(&receivedData, incomingData, sizeof(receivedData));
+
+    Serial.print("Received message from ");
+    for (int i = 0; i < 6; i++) {
+        Serial.printf("%02X", info->src_addr[i]);
+        if (i < 5) Serial.print(":");
+    }
+    Serial.print(" -> ");
+    Serial.println(receivedData.message);
+
+    // Check if the received message contains a count value
+    if (strncmp(receivedData.message, "Count:", 6) == 0) {
+        int count = atoi(receivedData.message + 7); // Extract the integer count
+
+        // Identify which slave sent the message and store the count
+        if (memcmp(info->src_addr, slave1, 6) == 0) pressCounts[0] = count;
+        else if (memcmp(info->src_addr, slave2, 6) == 0) pressCounts[1] = count;
+        else if (memcmp(info->src_addr, slave3, 6) == 0) pressCounts[2] = count;
+
+        receivedCounts++; // Increase count of received responses
+    }
+
+    // Blink LED when message is received
+    digitalWrite(LED_PIN, HIGH);
+    delay(100);
+    digitalWrite(LED_PIN, LOW);
+}
+
+void sendMessageToSlaves(const char *msg) {
+    strcpy(replyData.message, msg);
+    esp_now_send(slave1, (uint8_t *)&replyData, sizeof(replyData));
+    esp_now_send(slave2, (uint8_t *)&replyData, sizeof(replyData));
+    esp_now_send(slave3, (uint8_t *)&replyData, sizeof(replyData));
+    Serial.print("Sent message to all slaves: ");
+    Serial.println(msg);
+}
+
+void sendReplyToOneSlave() {
+    int buttonState = digitalRead(BUTTON_PIN);
+
+    if (buttonState == LOW && !messageSent) {  
+        Serial.println("Button pressed, selecting one slave to send message.");
+
+        strcpy(replyData.message, "Hi");
+
+        uint8_t *selectedSlave;
+        int randomChoice = random(0, 3);
+        if (randomChoice == 0) selectedSlave = slave1;
+        else if (randomChoice == 1) selectedSlave = slave2;
+        else selectedSlave = slave3;
+
+        esp_err_t result = esp_now_send(selectedSlave, (uint8_t *)&replyData, sizeof(replyData));
+
+        if (result == ESP_OK) {
+            Serial.print("Reply sent successfully to ");
+            if (selectedSlave == slave1) Serial.println("Slave 1");
+            else if (selectedSlave == slave2) Serial.println("Slave 2");
+            else Serial.println("Slave 3");
+
+            gameActive = true;
+            gameStartTime = millis();
+            totalPressCount = 0; // Reset count at the start of a new game
+            receivedCounts = 0;  // Reset received counter
+            memset(pressCounts, 0, sizeof(pressCounts)); // Reset individual counts
+        } else {
+            Serial.println("Failed to send reply.");
+        }
+
+        messageSent = true;
+        delay(50);
+    }
+
+    if (buttonState == HIGH) {
+        messageSent = false;
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    WiFi.mode(WIFI_STA);
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(LED_PIN, OUTPUT);
+
+    WiFi.channel(1);
+
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("ESP-NOW initialization failed!");
+        return;
+    }
+
+    esp_now_register_recv_cb(OnDataRecv);
+
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, slave1, 6);
+    peerInfo.channel = 1;
+    peerInfo.encrypt = false;
+    esp_now_add_peer(&peerInfo);
+
+    memcpy(peerInfo.peer_addr, slave2, 6);
+    esp_now_add_peer(&peerInfo);
+
+    memcpy(peerInfo.peer_addr, slave3, 6);
+    esp_now_add_peer(&peerInfo);
+
+    Serial.println("ESP32 Ready.");
+}
+
+void loop() {
+    sendReplyToOneSlave();
+
+    if (gameActive && millis() - gameStartTime >= gameDuration) {
+        gameActive = false;
+        sendMessageToSlaves("STOP");
+
+        Serial.println("Waiting for all responses...");
+        unsigned long responseWaitStart = millis();
+
+        // Wait up to 2 seconds for all slave responses
+        while (receivedCounts < totalSlaves && millis() - responseWaitStart < 2000) {
+            delay(50);
+        }
+
+        // Calculate total presses from unique counts
+        totalPressCount = pressCounts[0] + pressCounts[1] + pressCounts[2];
+
+        Serial.println("=== Game Ended ===");
+        Serial.print("Slave 1 Press Count: "); Serial.println(pressCounts[0]);
+        Serial.print("Slave 2 Press Count: "); Serial.println(pressCounts[1]);
+        Serial.print("Slave 3 Press Count: "); Serial.println(pressCounts[2]);
+        Serial.print("Total Button Presses: "); Serial.println(totalPressCount);
+
+        // Reset for next round
+        totalPressCount = 0;
+        receivedCounts = 0;
+        memset(pressCounts, 0, sizeof(pressCounts));
+    }
+}
