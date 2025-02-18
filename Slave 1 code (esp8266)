@@ -1,0 +1,122 @@
+#include <espnow.h>
+#include <ESP8266WiFi.h>
+
+#define BUTTON_PIN D5   // GPIO5 (D5 on ESP8266)
+#define BULB_PIN D2     // GPIO2 (D3 on ESP8266) for the bulb
+#define BUZZER_PIN D1   // GPIO2 (D4 on ESP8266) for the buzzer
+
+// Define MAC addresses
+uint8_t slave2[] = {0x30, 0x83, 0x98, 0xA2, 0xC1, 0x72};  // Slave 2 MAC
+uint8_t slave3[] = {0xBC, 0xFF, 0x4D, 0x19, 0x90, 0xD9};  // Slave 3 MAC
+uint8_t serverMAC[] = {0x24, 0xD7, 0xEB, 0x0C, 0x8D, 0xF0}; // ESP32 Server MAC
+
+typedef struct struct_message {
+    char message[32];
+} struct_message;
+
+struct_message receivedData;
+struct_message countMessage;
+struct_message dataToSend;
+
+unsigned long timerStart = 0;
+bool timerActive = false;
+bool buttonPressed = false;
+bool isActive = false;
+int buttonPressCount = 0;
+
+// Callback when data is sent
+void OnDataSent(uint8_t *mac_addr, uint8_t sendStatus) {
+    Serial.print("Send Status: ");
+    Serial.println(sendStatus == 0 ? "Success" : "Fail");
+}
+
+// Callback when data is received
+void OnDataRecv(uint8_t *mac, uint8_t *incomingData, uint8_t len) {
+    memcpy(&receivedData, incomingData, sizeof(receivedData));
+    Serial.print("Received message: ");
+    Serial.println(receivedData.message);
+
+    if (strcmp(receivedData.message, "STOP") == 0) {
+        Serial.print("Session Ended. Total button presses: ");
+        Serial.println(buttonPressCount);
+        sendButtonPressCount();
+        digitalWrite(BULB_PIN, LOW);
+        digitalWrite(BUZZER_PIN, LOW);
+        timerActive = false;
+        isActive = false;
+        buttonPressCount = 0;
+        Serial.println("STOP received, game paused.");
+    } else {
+        isActive = true;
+        digitalWrite(BULB_PIN, HIGH);
+        digitalWrite(BUZZER_PIN, HIGH);
+        timerStart = millis();
+        timerActive = true;
+        buttonPressCount = 0;
+        Serial.println("Bulb and Buzzer ON, timer started.");
+    }
+}
+
+void sendButtonPressCount() {
+    sprintf(countMessage.message, "Count: %d", buttonPressCount);
+    esp_now_send(serverMAC, (uint8_t *)&countMessage, sizeof(countMessage));
+    Serial.print("Sent button press count to server: ");
+    Serial.println(countMessage.message);
+}
+
+void setup() {
+    Serial.begin(115200);
+    randomSeed(analogRead(0));
+
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(BULB_PIN, OUTPUT);
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BULB_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+
+    WiFi.mode(WIFI_STA);
+    if (esp_now_init() != 0) {
+        Serial.println("ESP-NOW initialization failed!");
+        return;
+    }
+
+    esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
+    esp_now_register_send_cb(OnDataSent);
+    esp_now_register_recv_cb(OnDataRecv);
+    esp_now_add_peer(slave2, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
+    esp_now_add_peer(slave3, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
+    esp_now_add_peer(serverMAC, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
+
+    Serial.println("ESP8266 Ready.");
+}
+
+void loop() {
+    if (timerActive && millis() - timerStart >= 10000) {
+        digitalWrite(BULB_PIN, LOW);
+        digitalWrite(BUZZER_PIN, LOW);
+        Serial.print("Session Ended. Total button presses: ");
+        Serial.println(buttonPressCount);
+        sendButtonPressCount();
+        timerActive = false;
+        isActive = false;
+        buttonPressCount = 0;
+    }
+
+    if (isActive && digitalRead(BUTTON_PIN) == LOW && !buttonPressed) {
+        buttonPressed = true;
+        buttonPressCount++;
+        digitalWrite(BULB_PIN, LOW);
+        digitalWrite(BUZZER_PIN, LOW);
+        Serial.print("Button pressed, bulb and buzzer turned OFF. Press count: ");
+        Serial.println(buttonPressCount);
+        strcpy(dataToSend.message, "Hello from ESP8266");
+        uint8_t *selectedDevice = (random(1, 3) == 1) ? slave2 : slave3;
+        Serial.println("Message sent to a Slave");
+        esp_now_send(selectedDevice, (uint8_t *)&dataToSend, sizeof(dataToSend));
+        delay(10);
+    }
+
+    if (digitalRead(BUTTON_PIN) == HIGH) {
+        buttonPressed = false;
+    }
+}
